@@ -198,7 +198,7 @@ def main(args):
             x = x.squeeze(dim=1)
             y = y.squeeze(dim=1)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y=y, our_conf_weight=args.conf_weight, our_conf_learn=args.conf_weight_learned)
+            model_kwargs = dict(y=y, our_conf_weight=args.conf_weight, our_conf_learned=args.conf_weight_learned)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
