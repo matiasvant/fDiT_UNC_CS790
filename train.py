@@ -198,7 +198,8 @@ def main(args):
             x = x.squeeze(dim=1)
             y = y.squeeze(dim=1)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y=y)
+            model_kwargs = dict(y=y)  # OUR PARAMS: (our_conf_weight=True, -- basic conf weighting
+                                      #              our_conf_learn=True) -- toggle to add incorporation of class/timestep into conf weighting
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
