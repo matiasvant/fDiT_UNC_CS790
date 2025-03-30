@@ -258,7 +258,7 @@ class DiT(nn.Module):
             return outputs
         return ckpt_forward
 
-    def forward(self, x, t, y, return_embeds=False):
+    def forward(self, x, t, y, our_conf_weight=False, our_conf_learned=False):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -274,7 +274,24 @@ class DiT(nn.Module):
             x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c)       # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        if return_embeds: return x, t, y
+
+        # weight noise by confidence
+        if our_conf_weight:
+            assert self.learn_sigma, "Must learn a variance to do conf. weighting"
+            mean, var = x[:, :4, :, :], x[:, 4:, :, :]
+            # print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
+            # print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
+
+            if our_conf_learned:
+                # print("C embed shape:", c.shape)
+                var = self.our_conf_conditioner(var, c)
+                # print("Weighted var shape:", var.shape)
+            
+            eps=1e-4
+            confidence = 1/(var + eps)
+            mean = mean * confidence
+            out = torch.cat([mean, var], dim=1)
+
         return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale, our_conf_weight=False, our_conf_learned=False):
@@ -284,11 +301,7 @@ class DiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y, return_embeds=our_conf_learned)
-        if our_conf_learned:
-            y_embed = model_out[2]
-            t_embed = model_out[1]
-            model_out = model_out[0]
+        model_out = self.forward(combined, t, y, our_conf_weight=our_conf_weight, our_conf_learned=our_conf_learned)
 
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
@@ -300,22 +313,6 @@ class DiT(nn.Module):
         eps = torch.cat([half_eps, half_eps], dim=0)
         out = torch.cat([eps, rest], dim=1)
         
-        # weight noise by confidence
-        if our_conf_weight: 
-            mean, var = out[:, :4, :, :], out[:, 4:, :, :]
-            # print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
-            # print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
-
-            if our_conf_learned:
-                c = y_embed + t_embed
-                # print("C embed shape:", c.shape)
-                var = self.our_conf_conditioner(var, c)
-                # print("Weighted var shape:", var.shape)
-            
-            eps=1e-4
-            confidence = 1/(var + eps)
-            mean = mean * confidence
-            out = torch.cat([mean, var], dim=1)
         return out
 
 
