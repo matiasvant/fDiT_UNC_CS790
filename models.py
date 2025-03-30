@@ -9,6 +9,7 @@
 # MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
 # --------------------------------------------------------
 
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -142,6 +143,22 @@ class FinalLayer(nn.Module):
         return x
 
 
+class SpatialBiasLayer(nn.Module):
+    def __init__(self, vector_dim, spatial_size): # 32 in this case
+        super().__init__()
+        self.spatial_size = spatial_size
+        self.linear = nn.Linear(vector_dim, spatial_size * spatial_size)
+
+    def forward(self, image_tensor, info_vector):
+        # image_tensor: (B, C, H, W)  e.g., (16, 4, 32, 32)
+        # info_vector: (B, D)        e.g., (16, D)
+        
+        spatial_bias_vector = self.linear(info_vector) # (B, 32*32)
+        spatial_bias_map = spatial_bias_vector.view(-1, 1, self.spatial_size, self.spatial_size) # (B, 1, 32, 32)
+        # broadcast spatial bias to all channels and add
+        return image_tensor + spatial_bias_map
+
+
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -158,6 +175,7 @@ class DiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1000,
         learn_sigma=True,
+        our_conf_learned=True
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -177,10 +195,14 @@ class DiT(nn.Module):
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        
+        if our_conf_learned:
+            self.our_conf_conditioner = SpatialBiasLayer(hidden_size, input_size)
+        
         self.initialize_weights()
 
     def initialize_weights(self):
-        # Initialize transformer layers:
+        # Initialize transformer layers:   (also covers our_conf_conditioner)
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -236,7 +258,7 @@ class DiT(nn.Module):
             return outputs
         return ckpt_forward
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, return_embeds=False):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -247,20 +269,27 @@ class DiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
+        
         for block in self.blocks:
             x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, c)       # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        if return_embeds: return x, t, y
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, y, cfg_scale, our_conf_weight=False, our_conf_learned=False):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y, return_embeds=our_conf_learned)
+        if our_conf_learned:
+            y_embed = model_out[2]
+            t_embed = model_out[1]
+            model_out = model_out[0]
+
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -269,7 +298,25 @@ class DiT(nn.Module):
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
+        out = torch.cat([eps, rest], dim=1)
+        
+        # weight noise by confidence
+        if our_conf_weight: 
+            mean, var = out[:, :4, :, :], out[:, 4:, :, :]
+            print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
+            print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
+
+            if our_conf_learned:
+                c = y_embed + t_embed
+                print("C embed shape:", c.shape)
+                var = self.our_conf_conditioner(var, c)
+                print("Weighted var shape:", var.shape)
+            
+            eps=1e-4
+            confidence = 1/(var + eps)
+            mean = mean * confidence
+            out = torch.cat([mean, var], dim=1)
+        return out
 
 
 #################################################################################
