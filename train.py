@@ -198,8 +198,7 @@ def main(args):
             x = x.squeeze(dim=1)
             y = y.squeeze(dim=1)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y=y)  # OUR PARAMS: (our_conf_weight=True, -- basic conf weighting
-                                      #              our_conf_learn=True) -- toggle to add incorporation of class/timestep into conf weighting
+            model_kwargs = dict(y=y, our_conf_weight=args.conf_weight, our_conf_learn=args.conf_weight_learned)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
@@ -261,5 +260,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
+    
+    parser.add_argument("--conf_weight", action="store_true", help="Enable basic conf weighting")
+    parser.add_argument("--conf_weight_learned", action="store_true", help="Enable incorporation of class/timestep into conf weighting")
     args = parser.parse_args()
     main(args)
