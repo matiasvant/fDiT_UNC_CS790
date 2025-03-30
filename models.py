@@ -303,14 +303,14 @@ class DiT(nn.Module):
         # weight noise by confidence
         if our_conf_weight: 
             mean, var = out[:, :4, :, :], out[:, 4:, :, :]
-            print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
-            print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
+            # print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
+            # print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
 
             if our_conf_learned:
                 c = y_embed + t_embed
-                print("C embed shape:", c.shape)
+                # print("C embed shape:", c.shape)
                 var = self.our_conf_conditioner(var, c)
-                print("Weighted var shape:", var.shape)
+                # print("Weighted var shape:", var.shape)
             
             eps=1e-4
             confidence = 1/(var + eps)
