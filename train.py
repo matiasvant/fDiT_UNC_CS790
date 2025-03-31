@@ -146,7 +146,8 @@ def main(args):
     latent_size = args.image_size // 8
     model = DiT_models[args.model](
         input_size=latent_size,
-        num_classes=args.num_classes
+        num_classes=args.num_classes,
+        our_conf_learned=args.our_conf_learned
     )
     # Note that parameter initialization is done within the DiT constructor
     model = model.to(device)
