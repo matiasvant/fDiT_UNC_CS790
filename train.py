@@ -147,7 +147,7 @@ def main(args):
     model = DiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        our_conf_learned=args.our_conf_learned
+        our_conf_learned=args.conf_weight_learned
     )
     # Note that parameter initialization is done within the DiT constructor
     model = model.to(device)
