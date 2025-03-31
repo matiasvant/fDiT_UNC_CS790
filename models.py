@@ -290,7 +290,7 @@ class DiT(nn.Module):
             eps=1e-4
             confidence = 1/(var + eps)
             mean = mean * confidence
-            out = torch.cat([mean, var], dim=1)
+            x = torch.cat([mean, var], dim=1)
 
         return x
 
