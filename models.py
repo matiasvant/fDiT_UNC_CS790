@@ -156,7 +156,11 @@ class SpatialBiasLayer(nn.Module):
         spatial_bias_vector = self.linear(info_vector) # (B, 32*32)
         spatial_bias_map = spatial_bias_vector.view(-1, 1, self.spatial_size, self.spatial_size) # (B, 1, 32, 32)
         # broadcast spatial bias to all channels and add
-        return image_tensor + spatial_bias_map
+        
+        # for stability
+        spb_map_normed = (spatial_bias_map - spatial_bias_map.min()) / (spatial_bias_map.max() - spatial_bias_map.min() + 1e-8)
+        
+        return image_tensor * spatial_bias_map
 
 
 class DiT(nn.Module):
@@ -198,8 +202,14 @@ class DiT(nn.Module):
         
         if our_conf_learned:
             self.our_conf_conditioner = SpatialBiasLayer(hidden_size, input_size)
-        
-        self.initialize_weights()
+            self.initialize_weights()
+            for name, param in self.named_parameters():
+                if "our_conf" in name: # freeze all other weights to ft conf-learning
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+        else:
+            self.initialize_weights()
 
     def initialize_weights(self):
         # Initialize transformer layers:   (also covers our_conf_conditioner)
