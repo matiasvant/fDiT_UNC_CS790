@@ -142,25 +142,25 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
+# old conf_weighting func 
+# class SpatialBiasLayer(nn.Module):
+#     def __init__(self, vector_dim, spatial_size): # 32 in this case
+#         super().__init__()
+#         self.spatial_size = spatial_size
+#         self.linear = nn.Linear(vector_dim, spatial_size * spatial_size)
 
-class SpatialBiasLayer(nn.Module):
-    def __init__(self, vector_dim, spatial_size): # 32 in this case
-        super().__init__()
-        self.spatial_size = spatial_size
-        self.linear = nn.Linear(vector_dim, spatial_size * spatial_size)
-
-    def forward(self, image_tensor, info_vector):
-        # image_tensor: (B, C, H, W)  e.g., (16, 4, 32, 32)
-        # info_vector: (B, D)        e.g., (16, D)
+#     def forward(self, image_tensor, info_vector):
+#         # image_tensor: (B, C, H, W)  e.g., (16, 4, 32, 32)
+#         # info_vector: (B, D)        e.g., (16, D)
         
-        spatial_bias_vector = self.linear(info_vector) # (B, 32*32)
-        spatial_bias_map = spatial_bias_vector.view(-1, 1, self.spatial_size, self.spatial_size) # (B, 1, 32, 32)
-        # broadcast spatial bias to all channels and add
+#         spatial_bias_vector = self.linear(info_vector) # (B, 32*32)
+#         spatial_bias_map = spatial_bias_vector.view(-1, 1, self.spatial_size, self.spatial_size) # (B, 1, 32, 32)
+#         # broadcast spatial bias to all channels and add
         
-        # for stability
-        spb_map_normed = (spatial_bias_map - spatial_bias_map.min()) / (spatial_bias_map.max() - spatial_bias_map.min() + 1e-8)
+#         # for stability
+#         spb_map_normed = (spatial_bias_map - spatial_bias_map.min()) / (spatial_bias_map.max() - spatial_bias_map.min() + 1e-8)
         
-        return image_tensor * spatial_bias_map
+#         return image_tensor * spatial_bias_map
 
 
 class DiT(nn.Module):
@@ -184,7 +184,10 @@ class DiT(nn.Module):
         super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
-        self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        num_outputs = 1
+        if learn_sigma: num_outputs += 1
+        if our_conf_learned: num_outputs += 1
+        self.out_channels = in_channels * num_outputs
         self.patch_size = patch_size
         self.num_heads = num_heads
 
@@ -199,18 +202,14 @@ class DiT(nn.Module):
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        
-        if our_conf_learned:
-            self.our_conf_conditioner = SpatialBiasLayer(hidden_size, input_size)
-            self.initialize_weights()
-            for name, param in self.named_parameters():
-                if "our_conf" in name: # freeze all other weights to ft conf-learning
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
-        else:
-            self.initialize_weights()
 
+        stop_freezing = False
+        cutoff_lay = 'blocks.14'
+        for name, param in self.named_parameters(): 
+          if cutoff_lay in name: stop_freezing = True
+          if not stop_freezing: 
+            param.requires_grad = False
+  
     def initialize_weights(self):
         # Initialize transformer layers:   (also covers our_conf_conditioner)
         def _basic_init(module):
@@ -275,6 +274,7 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
+        print("In forward, have started shit")
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
@@ -288,19 +288,17 @@ class DiT(nn.Module):
         # weight noise by confidence
         if our_conf_weight:
             assert self.learn_sigma, "Must learn a variance to do conf. weighting"
-            mean, var = x[:, :4, :, :], x[:, 4:, :, :]
-            # print("Mean shape:", mean.shape)        # Expect (16, 4, 32, 32)
-            # print("Variance shape:", var.shape) # Expect (16, 4, 32, 32)
-
-            if our_conf_learned:
-                # print("C embed shape:", c.shape)
-                var = self.our_conf_conditioner(var, c)
-                # print("Weighted var shape:", var.shape)
-            
+            mean, var = x[:, :4, :, :], x[:, 4:8, :, :] # each is (N, 4, H, W)
             eps=1e-4
             confidence = 1/(var + eps)
+
+            if our_conf_learned:
+                weight_by = x[:, 8:, :, :] # also (N, 4, H, W)
+                confidence = confidence * weight_by
+
+            confidence = torch.sigmoid(confidence)
             mean = mean * confidence
-            x = torch.cat([mean, var], dim=1)
+            out = torch.cat([mean, var], dim=1)
 
         return x
 
