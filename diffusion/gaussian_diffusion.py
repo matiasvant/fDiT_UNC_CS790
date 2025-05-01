@@ -254,9 +254,10 @@ class GaussianDiffusion:
     def p_mean_variance(self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None):
         """
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
-        the initial x, x_0.
+        the initial x, x_0. Modified to handle model outputs with 1, 2, or 3 * C channels.
         :param model: the model, which takes a signal and a batch of timesteps
-                      as input.
+                      as input. Expected to output (N, out_channels, H, W) where
+                      out_channels is C, 2*C, or 3*C.
         :param x: the [N x C x ...] tensor at time t.
         :param t: a 1-D Tensor of timesteps.
         :param clip_denoised: if True, clip the denoised signal into [-1, 1].
@@ -266,71 +267,120 @@ class GaussianDiffusion:
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
         :return: a dict with the following keys:
-                 - 'mean': the model mean output.
-                 - 'variance': the model variance output.
-                 - 'log_variance': the log of 'variance'.
-                 - 'pred_xstart': the prediction for x_0.
+                  - 'mean': the model mean output.
+                  - 'variance': the model variance output.
+                  - 'log_variance': the log of 'variance'.
+                  - 'pred_xstart': the prediction for x_0.
+                  - 'extra': any extra output from the model (if it returns a tuple).
+                  - 'confidence': the predicted confidence channel (if model output has 3*C channels), otherwise None.
         """
         if model_kwargs is None:
             model_kwargs = {}
-
-        B, C = x.shape[:2]
+    
+        B, C = x.shape[:2] # Batch size and input channel size (e.g., 4 for latent)
         assert t.shape == (B,)
-        model_output = model(x, t, **model_kwargs)
-        if isinstance(model_output, tuple):
-            model_output, extra = model_output
+    
+        # Get the model output
+        model_output_full = model(x, t, **model_kwargs)
+    
+        # Handle potential tuple output (DiT doesn't use this, but good to keep)
+        if isinstance(model_output_full, tuple):
+            model_output_full, extra = model_output_full
         else:
             extra = None
-
-        if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
-            assert model_output.shape == (B, C * 2, *x.shape[2:])
-            model_output, model_var_values = th.split(model_output, C, dim=1)
+    
+        total_output_channels = model_output_full.shape[1]
+        conf_pred = None # Initialize confidence prediction to None
+    
+        if total_output_channels == C * 3:
+            # Model outputs mean, variance, and confidence
+            if self.model_var_type not in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+                  print(f"Warning: Model output has {total_output_channels} channels, but var type {self.model_var_type} is not learned variance.")
+            
+            model_output_mean, model_output_var, conf_pred = th.split(model_output_full, C, dim=1)
+    
             min_log = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
             max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
-            # The model_var_values is [-1, 1] for [min_var, max_var].
-            frac = (model_var_values + 1) / 2
+            frac = (model_output_var + 1) / 2
             model_log_variance = frac * max_log + (1 - frac) * min_log
             model_variance = th.exp(model_log_variance)
-        else:
-            model_variance, model_log_variance = {
-                # for fixedlarge, we set the initial (log-)variance like so
-                # to get a better decoder log likelihood.
-                ModelVarType.FIXED_LARGE: (
-                    np.append(self.posterior_variance[1], self.betas[1:]),
-                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
-                ),
-                ModelVarType.FIXED_SMALL: (
-                    self.posterior_variance,
-                    self.posterior_log_variance_clipped,
-                ),
-            }[self.model_var_type]
-            model_variance = _extract_into_tensor(model_variance, t, x.shape)
-            model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+    
+            # The first C channels are used for predicting the mean/xstart/epsilon
+            model_output_for_mean = model_output_mean
+    
+        elif total_output_channels == C * 2:
+            # Model outputs mean and variance (standard learned variance)
+            if self.model_var_type not in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+                  print(f"Warning: Model output has {total_output_channels} channels, but var type {self.model_var_type} is not learned variance.")
+            
+            model_output_mean, model_output_var = th.split(model_output_full, C, dim=1)
+    
+            # Calculate variance from prediction
+            min_log = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
+            max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
+            frac = (model_output_var + 1) / 2
+            model_log_variance = frac * max_log + (1 - frac) * min_log
+            model_variance = th.exp(model_log_variance)
+    
+            # The first C channels are used for predicting the mean/xstart/epsilon
+            model_output_for_mean = model_output_mean
 
-        def process_xstart(x):
+        elif total_output_channels == C:
+              # Model outputs only noise or mean (fixed variance)
+              if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
+                  print(f"Warning: Model output has {total_output_channels} channels, but var type {self.model_var_type} expects learned variance.")
+    
+              model_output_for_mean = model_output_full
+              model_variance, model_log_variance = {
+                  ModelVarType.FIXED_LARGE: (
+                      np.append(self.posterior_variance[1], self.betas[1:]),
+                      np.log(np.append(self.posterior_variance[1], self.betas[1:])),
+                  ),
+                  ModelVarType.FIXED_SMALL: (
+                      self.posterior_variance,
+                      self.posterior_log_variance_clipped,
+                  ),
+              }[self.model_var_type] # This will raise error if self.model_var_type is not Fixed
+              model_variance = _extract_into_tensor(model_variance, t, x.shape)
+              model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+
+        else:
+              # Unexpected number of channels
+              raise ValueError(f"Model output has unexpected number of channels: {total_output_channels}. Expected C, 2*C, or 3*C.")
+    
+        def process_xstart(x_start):
             if denoised_fn is not None:
-                x = denoised_fn(x)
+                x_start = denoised_fn(x_start)
             if clip_denoised:
-                return x.clamp(-1, 1)
-            return x
-
+                return x_start.clamp(-1, 1)
+            return x_start
+    
+        # Use the correctly extracted prediction for mean/epsilon
         if self.model_mean_type == ModelMeanType.START_X:
-            pred_xstart = process_xstart(model_output)
-        else:
-            pred_xstart = process_xstart(
-                self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
+            pred_xstart = process_xstart(model_output_for_mean)
+        elif self.model_mean_type == ModelMeanType.EPSILON: # Added explicit check for EPSILON
+              pred_xstart = process_xstart(
+                self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output_for_mean)
             )
+        else:
+              raise NotImplementedError(f"Unknown model_mean_type: {self.model_mean_type}")
+    
+    
         model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_t=x, t=t)
-
+    
         assert model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
+        if conf_pred is not None:
+              assert conf_pred.shape == x.shape 
+    
         return {
             "mean": model_mean,
             "variance": model_variance,
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
             "extra": extra,
+            "confidence": conf_pred, # <-- Added the confidence output here
         }
-
+    
     def _predict_xstart_from_eps(self, x_t, t, eps):
         assert x_t.shape == eps.shape
         return (
